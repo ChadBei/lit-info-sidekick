@@ -52,6 +52,7 @@ String formattedTimeNum = "";
 long lastKnobPosition = 0;
 bool showMenu = false;
 short menuIndex = 0;
+String selectedDate = "";
 
 // ------------------------------------------------------------------
 // Oled Display Setup
@@ -80,9 +81,11 @@ ezButton button(BUTTON_PIN);
 // ------------------------------------------------------------------
 void setupNetwork();
 void printDisplay_Connecting(String status, String step, String wifiName, bool showWifiIcon);
+void printDisplay_Menu(short menuIndex);
 void printDisplay(String line1, String line2, String line3);
 void updateScreen();
-void fetchAllReadings();
+void fetchAllReadings(String readingsDate);
+String SelectDate();
 void drawSplash();
 String getUserHardwareInput(String prompt);
 String scanAndSelectWiFi();
@@ -127,7 +130,7 @@ void setup() {
   
   // 2. Fetch Data (One-time poll)
   printDisplay("Downloading", "Fetching USCCB Readings...", formattedTime);
-  fetchAllReadings();
+  fetchAllReadings(formattedTimeNum);
 
   // 3. Disconnect WiFi to save power
   WiFi.disconnect(true);
@@ -150,31 +153,62 @@ void loop() {
     Serial.println("Knob turned right");
     lastKnobPosition = currKnobPosition;
 
-        currentIndex++;
+        if (showMenu == true){
+          menuIndex++;
+          if (menuIndex > 2) 
+            menuIndex = 0; // Wrap around menu options{
+        } else
+          currentIndex++;
     
     // Wrap around if we hit the end
-    if (currentIndex >= readingCount) {
-      currentIndex = 0; 
-    }
-  } else if (currKnobPosition < lastKnobPosition){
-    Serial.println("Knob turned right");
-    lastKnobPosition = currKnobPosition;
+    if (currentIndex >= readingCount) 
+          currentIndex = 0; 
 
-        currentIndex--;
-    
+  } else if (currKnobPosition < lastKnobPosition){
+    Serial.println("Knob turned left");
+    lastKnobPosition = currKnobPosition;
+    if (showMenu == true){
+          menuIndex--;
+          if (menuIndex < 0) 
+            menuIndex = 2; // Wrap around menu options{
+        } else
+          currentIndex--;
+
     // Wrap around if we hit the end
     if (currentIndex < 0) {
       currentIndex = readingCount - 1; 
     }
   }
   
-
   if(button.isPressed() && showMenu == false){
     button.loop();
     // Implement menu to select date, reset wifi, reload readings, etc.
     showMenu = true;
     menuIndex = 0;
     Serial.println("Menu button pressed");
+  } else if (button.isPressed() && showMenu == true){
+    button.loop();
+    showMenu = false;
+    Serial.println("Menu button pressed - exiting menu");
+
+    // Select Menu Option
+    if (menuIndex == 0){
+      Serial.println("Entering Date Selection Menu...");
+      selectedDate = SelectDate(); 
+      
+      printDisplay("Fetching Readings", "Please wait...", "");
+      fetchAllReadings(selectedDate); 
+    } else if (menuIndex == 1){
+      Serial.println("Resetting WiFi...");
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      setupNetwork();
+    } else if (menuIndex == 2){
+      Serial.println("Reloading Readings...");
+      printDisplay("Reloading", "Fetching USCCB Readings...", formattedTime);
+      fetchAllReadings(selectedDate);
+    }
+
   }
 
   // Always update screen at end of loop
@@ -225,9 +259,7 @@ void setupNetwork() {
     Serial.println("Starting Manual Input Mode...");
     
     String ssid = scanAndSelectWiFi();
-    
-    // OR: Ask user to select SSID (Simplified for now to just password)
-    // If you need to scan networks, let me know!
+  
 
     printDisplay("WiFi Setup", "Click to start", "Hold to submit");
     while(!button.isPressed()) button.loop(); // Wait for click
@@ -254,16 +286,20 @@ void setupNetwork() {
   printDisplay_Connecting("WiFi Connected!", "Syncing Time...", "", true);
   
   // Time Sync Logic
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time");
-    formattedTime = "Date Error";
-  } else {
-    char buffer[64];
-    strftime(buffer, sizeof(buffer), "%A, %b %d %Y", &timeinfo);
-    formattedTime = String(buffer);
-    strftime(buffer, sizeof(buffer), "%m%d%y", &timeinfo);
-    formattedTimeNum = String(buffer);
+  if(selectedDate == "") {
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    if(!getLocalTime(&timeinfo)){
+      Serial.println("Failed to obtain time");
+      formattedTime = "Date Error";
+    } else {
+      char buffer[64];
+      strftime(buffer, sizeof(buffer), "%A, %b %d %Y", &timeinfo);
+      formattedTime = String(buffer);
+      strftime(buffer, sizeof(buffer), "%m%d%y", &timeinfo);
+      formattedTimeNum = String(buffer);
+      selectedDate = formattedTimeNum;
+    }
+
   }
 }
 
@@ -396,26 +432,127 @@ String scanAndSelectWiFi() {
 }
 
 // ------------------------------------------------------------------
+// DATE SELECTION MENU
+// ------------------------------------------------------------------
+String SelectDate() {
+  const int numDays = 14;
+  String dateOptions[numDays];
+  String dateNames[numDays]; // Friendly names for display
+  
+  // 1. Generate date options
+  time_t now = time(nullptr);
+  for (int i = 0; i < numDays; i++) {
+    time_t optionTime = now - (i * 24 * 3600) + (604800);
+    struct tm* optionTm = localtime(&optionTime);
+    
+    char codeBuf[32];
+    strftime(codeBuf, sizeof(codeBuf), "%m%d%y", optionTm);
+    dateOptions[i] = String(codeBuf);
+
+    char nameBuf[32];
+    strftime(nameBuf, sizeof(nameBuf), "%a, %b %d %Y", optionTm);
+    dateNames[i] = String(nameBuf);
+  }
+
+  // 2. Selection and Viewport Variables
+  knob.setCount(0);
+  int selectedIndex = 0;
+  int topVisibleIndex = 0;
+  const int linesPerScreen = 3; 
+  long lastKnobCount = -999;
+
+  while (true) {
+    button.loop();
+
+    // --- ENCODER LOGIC ---
+    long rawCount = knob.getCount();
+    long dividedCount = rawCount / 2;
+    
+    if (dividedCount != lastKnobCount) {
+        if (dividedCount > lastKnobCount) selectedIndex++;
+        else selectedIndex--;
+
+        // Clamp and Wrap
+        if (selectedIndex >= numDays) selectedIndex = 0;
+        if (selectedIndex < 0) selectedIndex = numDays - 1;
+
+        // --- VIEWPORT SCROLLING LOGIC ---
+        if (selectedIndex < topVisibleIndex) {
+          topVisibleIndex = selectedIndex;
+        } else if (selectedIndex >= topVisibleIndex + linesPerScreen) {
+          topVisibleIndex = selectedIndex - linesPerScreen + 1;
+        }
+
+        lastKnobCount = dividedCount;
+    }
+
+    if (button.isPressed()) {
+      button.loop();
+      formattedTime = dateNames[selectedIndex]; 
+      return dateOptions[selectedIndex];
+    }
+
+    // --- DRAW UI ---
+    u8g2.clearBuffer();
+    
+    // Header
+    u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+    u8g2.drawStr(20, 10, "Select Date");
+    u8g2.drawXBM(0, 0, 17, 16, image_folder_explorer_bits);
+    u8g2.drawLine(0, 16, 128, 16);
+
+    // List
+    u8g2.setFont(u8g2_font_6x10_tr);
+    int yPos = 28; // Starting Y for the first visible item
+
+    for (int i = topVisibleIndex; i < topVisibleIndex + linesPerScreen; i++) {
+      if (i >= numDays) break;
+
+      if (i == selectedIndex) {
+        u8g2.setDrawColor(1);
+        u8g2.drawBox(0, yPos - 9, 128, 13); // Highlight Bar
+        u8g2.setDrawColor(0); // Invert text
+      } else {
+        u8g2.setDrawColor(1);
+      }
+
+      u8g2.drawStr(4, yPos, dateNames[i].c_str());
+      u8g2.setDrawColor(1); // Reset for next line
+      yPos += 15; // Row spacing
+    }
+
+    // Scrollbar (Optional)
+    int barHeight = (64 - 18);
+    int thumbHeight = barHeight / numDays;
+    int thumbY = 18 + (selectedIndex * (barHeight - thumbHeight) / (numDays - 1));
+    u8g2.drawBox(126, thumbY, 2, thumbHeight);
+
+    u8g2.sendBuffer();
+  }
+}
+
+// ------------------------------------------------------------------
 // DISPLAY FUNCTIONS
 // ------------------------------------------------------------------
 void updateScreen() {
 
   // First check to display Menu
-  if (showMenu = true){
-    
-
+  if (showMenu == true){
+    // Serial.println("Showing Menu");
+    printDisplay_Menu(menuIndex);
   } else{
     // Update display with reading
     if (readingCount == 0) {
     printDisplay_Connecting("ERROR", "No Readings found","St. Anthony, Pray for Us", false);
+    Serial.println("No Readings found, cannot update screen.");
     return;
   }
   
   // Print to Serial for debugging
-  Serial.print("Displaying [");
-  Serial.print(currentIndex);
-  Serial.print("]: ");
-  Serial.println(dailyReadings[currentIndex].name);
+  // Serial.print("Displaying [");
+  // Serial.print(currentIndex);
+  // Serial.print("]: ");
+  // Serial.println(dailyReadings[currentIndex].name);
 
   // Draw on OLED
   printDisplay(dailyReadings[currentIndex].name, dailyReadings[currentIndex].address, formattedTime);
@@ -474,6 +611,40 @@ u8g2.clearBuffer();
 
 }
 
+void printDisplay_Menu(short menuIndex) {
+  u8g2.clearBuffer();
+  
+  // Line 1: Bold Header
+  u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+  u8g2.drawStr(30, 13, "MENU");
+
+  // Menu Options
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(1, 31, "1. Change Date");
+  u8g2.drawStr(1, 45, "2. Reset WiFi");
+  u8g2.drawStr(1, 59, "3. Reload Readings");
+
+  // Highlight Selected Option
+  if (menuIndex == 0) {
+    u8g2.drawBox(0, 22, 128, 14);
+    u8g2.setDrawColor(0);
+    u8g2.drawStr(1, 31, "1. Change Date");
+    u8g2.setDrawColor(1);
+  } else if (menuIndex == 1) {
+    u8g2.drawBox(0, 36, 128, 14);
+    u8g2.setDrawColor(0);
+    u8g2.drawStr(1, 45, "2. Reset WiFi");
+    u8g2.setDrawColor(1);
+  } else if (menuIndex == 2) {
+    u8g2.drawBox(0, 50, 128, 14);
+    u8g2.setDrawColor(0);
+    u8g2.drawStr(1, 59, "3. Reload Readings");
+    u8g2.setDrawColor(1);
+  }
+
+  u8g2.sendBuffer();
+}
+
 void drawSplash(void) {
     u8g2.clearBuffer();
     u8g2.setFontMode(1);
@@ -493,8 +664,11 @@ void drawSplash(void) {
 // ------------------------------------------------------------------
 // SCRAPER ENGINE
 // ------------------------------------------------------------------
-void fetchAllReadings() {
+void fetchAllReadings(String readingsDate) {
+  readingCount = 0; // Reset count before fetching new data
+  dailyReadings[0] = {"Clear", "Cleared"};
   
+  Serial.println("Wifi Status: " + String(WiFi.status()));
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
     client.setInsecure(); // Ignore SSL certificate errors
@@ -506,7 +680,7 @@ void fetchAllReadings() {
     
     Serial.println("Starting HTTP GET...");
     // formattedTimeNum = "012626"; // e.g., "012526" - Test Date
-    if (http.begin(client, serverUrl+formattedTimeNum+".cfm")) { // Full URL with date
+    if (http.begin(client, serverUrl+readingsDate+".cfm")) { // Full URL with date
       int httpCode = http.GET();
       Serial.print("HTTP Code: ");
       Serial.println(httpCode);
@@ -523,7 +697,7 @@ void fetchAllReadings() {
 
         Serial.println("Parsing Stream...");
 
-        while (http.connected() && (stream->available() > 0 || stream->connected())) {
+        while (http.connected() && (stream->available() > 0 )) {
           
           // SAFETY: Break if stream hangs for 5 seconds
           if (millis() - lastByteTime > TIMEOUT_MS) {
@@ -619,41 +793,11 @@ void fetchAllReadings() {
     } else {
       Serial.println("Connection Failed.");
     }
+  } else { // Connect Wifi if not connected
+    setupNetwork();
+    fetchAllReadings(readingsDate); // Retry fetching after reconnecting
   }
 }
-
-// String getUserHardwareInput(){
-//   bool pressedSubmit = false;
-//   char userInput[32] = "";
-//   long knobPosition = 0;
-
-//   Serial.println("\nPlease enter input using the knob and press button to submit:");
-
-//   long refTime = millis();
-//   while(pressedSubmit == false){
-//     // All below is in loop
-//     button.loop();
-//     long newKnobposition = knob.getCount();
-//     if (newKnobposition != knobPosition && (millis() - refTime) > 100) { // Debounce 100ms
-//       refTime = millis();
-//       Serial.print("Knob Position: ");
-//       Serial.println(newKnobposition);
-//       // Append character to input string
-//       char inputChar = map(newKnobposition, 0, 100, 65, 90); // Map to ASCII A-Z
-//       strncat(userInput, &inputChar, 1);
-//       Serial.print("Current Input: ");
-//       Serial.print(userInput);
-//       Serial.println();
-//       knobPosition = newKnobposition;
-//     }
-//     if (button.isPressed()) {
-//       button.loop();
-//       Serial.println("Submit Button Pressed");
-//       pressedSubmit = true;
-//     }
-//   }
-//   return String(userInput);
-// }
 
 String getUserHardwareInput(String prompt) {
   String userInput = "";
